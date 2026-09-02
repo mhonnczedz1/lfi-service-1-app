@@ -83,7 +83,7 @@ async def lifespan(app: FastAPI):
     await app.state.pool.close()
 
 
-app = FastAPI(title="service-1-gateway", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="service-1-gateway", version="1.1.0", lifespan=lifespan)
 
 
 # These two exist as dependencies rather than direct app.state reads so

@@ -10,6 +10,12 @@ permissions:
   contents: read
   packages: write
 
+# Serialises promotions from THIS repo. Cross-repo races are handled
+# by the rebase retry loop in the job below.
+concurrency:
+  group: promote-${{ github.repository }}
+  cancel-in-progress: false
+
 env:
   # The ONLY difference from service-2's workflow. Must match the `newName`
   # in kubernetes/service-1/kustomization.yaml, minus the registry and owner.
@@ -73,3 +79,75 @@ jobs:
           tags: ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  promote:
+    name: promote to gitops
+    # Only runs if `build` succeeded, so a tag is never written for an image
+    # that does not exist in GHCR. This ordering is the whole CI/CD seam.
+    needs: build
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the GitOps repo
+        uses: actions/checkout@v7
+        with:
+          # Note this checks out a DIFFERENT repo from the one running the
+          # workflow. That is why the automatic GITHUB_TOKEN is not enough:
+          # it is scoped to this repo only.
+          repository: ${{ github.repository_owner }}/lfi-infrastructure-gitops
+          token: ${{ secrets.GITOPS_PAT }}
+          # Into a subdirectory, so it cannot collide with this repo's files.
+          path: gitops
+
+      - name: Update the image tag and push
+        working-directory: gitops
+        # Passed as env vars rather than interpolated into the script with
+        # ${{ }}. Interpolation splices text into the shell before it runs,
+        # which is a script-injection route; env vars are just data.
+        env:
+          SHA: ${{ github.sha }}
+          SERVICE: service-1
+        run: |
+          set -euo pipefail
+
+          # Commit as the Actions bot. This exact address is what makes the
+          # bot avatar render on the commit in the GitHub UI.
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          MANIFEST="kubernetes/${SERVICE}/kustomization.yaml"
+
+          # The one-field edit that is the entire deployment. strenv(SHA) reads
+          # the env var as a string, so a numeric-looking SHA is not coerced.
+          # yq is preinstalled on ubuntu-latest runners.
+          yq -i '.images[0].newTag = strenv(SHA)' "$MANIFEST"
+
+          # Re-running the same commit is not an error. Without this guard,
+          # `git commit` would fail on an empty diff and fail the pipeline.
+          if git diff --quiet; then
+            echo "Tag already at ${SHA}. Nothing to promote."
+            exit 0
+          fi
+
+          git add "$MANIFEST"
+          git commit -m "deploy(${SERVICE}): ${SHA}"
+
+          # Both app repos push to this one repo, so a race is normal
+          # rather than exceptional. Rebase and retry instead of failing.
+          #
+          # Rebase, not merge: it replays our single one-line commit on top of
+          # theirs, so history stays linear and the two edits touch different
+          # files anyway. --autostash covers any stray working-tree change.
+          for attempt in 1 2 3 4 5; do
+            if git push; then
+              echo "Promoted ${SERVICE} to ${SHA} on attempt ${attempt}."
+              exit 0
+            fi
+            echo "Push rejected (attempt ${attempt}). Rebasing and retrying..."
+            git pull --rebase --autostash
+            # Back off a little further each time: 3s, 6s, 9s, 12s.
+            sleep $(( attempt * 3 ))
+          done
+
+          echo "Could not push after 5 attempts." >&2
+          exit 1
