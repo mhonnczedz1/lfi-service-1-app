@@ -119,7 +119,6 @@ jobs:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
-          # Full commit SHA as the tag. Never `latest`.
           # Two tags, one image. The build tag is what humans and the dev
           # overlay use; the SHA tag is what keeps the image traceable back to
           # a commit. The labels carry the same fact inside the image, so a
@@ -130,7 +129,7 @@ jobs:
           labels: |
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.version=${{ steps.tag.outputs.build_tag }}
-            org.opencontainers.image.source=https://github.com/${{ github.repository }}xww
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -173,7 +172,7 @@ jobs:
 
           # Task 10.2.1 moved this. Writing to the old path keeps CI green
           # while dev quietly stops receiving builds.
-          
+
           MANIFEST="kubernetes/overlays/dev/${SERVICE}/kustomization.yaml"
 
           # yq -i against a missing file does not reliably fail, so check.
@@ -183,16 +182,15 @@ jobs:
           fi
 
           yq -i '.images[0].newTag = strenv(BUILD_TAG)' "$MANIFEST"
-
           # Re-running the same commit is not an error. Without this guard,
           # `git commit` would fail on an empty diff and fail the pipeline.
           if git diff --quiet; then
-            echo "Tag already at ${SHA}. Nothing to promote."
+            echo "Tag already at ${BUILD_TAG}. Nothing to promote."
             exit 0
           fi
 
           git add "$MANIFEST"
-          git commit -m "deploy(${SERVICE}): ${SHA}"
+          git commit -m "deploy(${SERVICE}): ${BUILD_TAG}"
 
           # Both app repos push to this one repo, so a race is normal
           # rather than exceptional. Rebase and retry instead of failing.
@@ -202,7 +200,7 @@ jobs:
           # files anyway. --autostash covers any stray working-tree change.
           for attempt in 1 2 3 4 5; do
             if git push; then
-              echo "Promoted ${SERVICE} to ${SHA} on attempt ${attempt}."
+              echo "Promoted ${SERVICE} to ${BUILD_TAG} on attempt ${attempt}."
               exit 0
             fi
             echo "Push rejected (attempt ${attempt}). Rebasing and retrying..."
