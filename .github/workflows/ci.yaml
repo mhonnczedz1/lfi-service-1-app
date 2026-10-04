@@ -173,15 +173,25 @@ jobs:
           # Task 10.2.1 moved this. Writing to the old path keeps CI green
           # while dev quietly stops receiving builds.
 
-          MANIFEST="kubernetes/overlays/local/dev/${SERVICE}/kustomization.yaml"
+          MANIFESTS=(
+            "kubernetes/overlays/local/dev/${SERVICE}/kustomization.yaml"
+            "kubernetes/overlays/eks/dev/${SERVICE}/kustomization.yaml"
+          )
 
-          # yq -i against a missing file does not reliably fail, so check.
-          if [[ ! -f "$MANIFEST" ]]; then
-            echo "ERROR: ${MANIFEST} does not exist." >&2
-            exit 1
-          fi
+          # One build updates every tree, so local and EKS dev run the same
+          # build. Check every file exists before changing any of them.
+          for MANIFEST in "${MANIFESTS[@]}"; do
+            # yq -i against a missing file does not reliably fail, so check.
+            if [[ ! -f "$MANIFEST" ]]; then
+              echo "ERROR: ${MANIFEST} does not exist." >&2
+              exit 1
+            fi
+          done
 
-          yq -i '.images[0].newTag = strenv(BUILD_TAG)' "$MANIFEST"
+          # The one-field edit that constitutes the deployment, in each tree.
+          for MANIFEST in "${MANIFESTS[@]}"; do
+            yq -i '.images[0].newTag = strenv(BUILD_TAG)' "$MANIFEST"
+          done
           # Re-running the same commit is not an error. Without this guard,
           # `git commit` would fail on an empty diff and fail the pipeline.
           if git diff --quiet; then
@@ -189,7 +199,7 @@ jobs:
             exit 0
           fi
 
-          git add "$MANIFEST"
+          git add "${MANIFESTS[@]}"
           git commit -m "deploy(${SERVICE}): ${BUILD_TAG}"
 
           # Both app repos push to this one repo, so a race is normal
