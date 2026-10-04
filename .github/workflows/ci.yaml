@@ -173,7 +173,7 @@ jobs:
           # Task 10.2.1 moved this. Writing to the old path keeps CI green
           # while dev quietly stops receiving builds.
 
-          MANIFEST="kubernetes/overlays/dev/${SERVICE}/kustomization.yaml"
+          MANIFEST="kubernetes/overlays/local/dev/${SERVICE}/kustomization.yaml"
 
           # yq -i against a missing file does not reliably fail, so check.
           if [[ ! -f "$MANIFEST" ]]; then
