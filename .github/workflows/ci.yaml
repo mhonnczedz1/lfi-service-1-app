@@ -134,7 +134,7 @@ jobs:
           cache-to: type=gha,mode=max
 
   promote:
-    name: promote to gitops
+    name: promote
     # Only runs if `build` succeeded, so a tag is never written for an image
     # that does not exist in GHCR. This ordering is the whole CI/CD seam.
     needs: build
@@ -144,80 +144,77 @@ jobs:
       - name: Check out the GitOps repo
         uses: actions/checkout@v7
         with:
-          # Note this checks out a DIFFERENT repo from the one running the
-          # workflow. That is why the automatic GITHUB_TOKEN is not enough:
-          # it is scoped to this repo only.
           repository: ${{ github.repository_owner }}/lfi-infrastructure-gitops
           token: ${{ secrets.GITOPS_PAT }}
-          # Into a subdirectory, so it cannot collide with this repo's files.
           path: gitops
+      - name: Check out this service's config repo
+        uses: actions/checkout@v7
+        with:
+          # A different repository from the one running this workflow, so the
+          # automatic GITHUB_TOKEN is not enough. The PAT must list this repo.
+          repository: ${{ github.repository_owner }}/lfi-service-1-config
+          token: ${{ secrets.GITOPS_PAT }}
+          path: config
 
       - name: Update the image tag and push
-        working-directory: gitops
         # Passed as env vars rather than interpolated into the script with
         # ${{ }}. Interpolation splices text into the shell before it runs,
         # which is a script-injection route; env vars are just data.
         env:
-          # Was SHA. The manifest names the build now, not the commit.
           BUILD_TAG: ${{ needs.build.outputs.build_tag }}
           SERVICE: service-1
-
         run: |
           set -euo pipefail
 
-          # Commit as the Actions bot. This exact address is what makes the
-          # bot avatar render on the commit in the GitHub UI.
-          git config user.name  "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # push_tag <checkout dir> <manifest>...: set images[0].newTag in each
+          # manifest, commit, and push with a rebase-and-retry loop.
+          push_tag() {
+            local dir="$1"; shift
+            cd "$dir"
+            # Commit as the Actions bot. This exact address is what makes the
+            # bot avatar render on the commit in the GitHub UI.
+            git config user.name  "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          # Task 10.2.1 moved this. Writing to the old path keeps CI green
-          # while dev quietly stops receiving builds.
-
-          MANIFESTS=(
-            "kubernetes/overlays/local/dev/${SERVICE}/kustomization.yaml"
-            "kubernetes/overlays/eks/dev/${SERVICE}/kustomization.yaml"
-          )
-
-          # One build updates every tree, so local and EKS dev run the same
-          # build. Check every file exists before changing any of them.
-          for MANIFEST in "${MANIFESTS[@]}"; do
             # yq -i against a missing file does not reliably fail, so check.
-            if [[ ! -f "$MANIFEST" ]]; then
-              echo "ERROR: ${MANIFEST} does not exist." >&2
-              exit 1
+            local m
+            for m in "$@"; do
+              [[ -f "$m" ]] || { echo "ERROR: ${dir}/${m} does not exist." >&2; return 1; }
+            done
+            # The one-field edit that constitutes the deployment.
+            for m in "$@"; do
+              yq -i '.images[0].newTag = strenv(BUILD_TAG)' "$m"
+            done
+            # Re-running the same commit is not an error.
+            if git diff --quiet; then
+              echo "${dir}: tag already at ${BUILD_TAG}."
+              cd - >/dev/null
+              return 0
             fi
-          done
+            git add "$@"
+            git commit -m "deploy(${SERVICE}): ${BUILD_TAG}"
 
-          # The one-field edit that constitutes the deployment, in each tree.
-          for MANIFEST in "${MANIFESTS[@]}"; do
-            yq -i '.images[0].newTag = strenv(BUILD_TAG)' "$MANIFEST"
-          done
-          # Re-running the same commit is not an error. Without this guard,
-          # `git commit` would fail on an empty diff and fail the pipeline.
-          if git diff --quiet; then
-            echo "Tag already at ${BUILD_TAG}. Nothing to promote."
-            exit 0
-          fi
+            # Rebase and retry, because another run may push at the same moment.
+            local attempt
+            for attempt in 1 2 3 4 5; do
+              if git push; then
+                echo "${dir}: promoted ${SERVICE} to ${BUILD_TAG} on attempt ${attempt}."
+                cd - >/dev/null
+                return 0
+              fi
+              echo "Push rejected (attempt ${attempt}). Rebasing and retrying..."
+              git pull --rebase --autostash
+              sleep $(( attempt * 3 ))
+            done
+            echo "Could not push ${dir} after 5 attempts." >&2
+            return 1
+          }
 
-          git add "${MANIFESTS[@]}"
-          git commit -m "deploy(${SERVICE}): ${BUILD_TAG}"
-
-          # Both app repos push to this one repo, so a race is normal
-          # rather than exceptional. Rebase and retry instead of failing.
-          #
-          # Rebase, not merge: it replays our single one-line commit on top of
-          # theirs, so history stays linear and the two edits touch different
-          # files anyway. --autostash covers any stray working-tree change.
-          for attempt in 1 2 3 4 5; do
-            if git push; then
-              echo "Promoted ${SERVICE} to ${BUILD_TAG} on attempt ${attempt}."
-              exit 0
-            fi
-            echo "Push rejected (attempt ${attempt}). Rebasing and retrying..."
-            git pull --rebase --autostash
-            # Back off a little further each time: 3s, 6s, 9s, 12s.
-            sleep $(( attempt * 3 ))
-          done
-
-          echo "Could not push after 5 attempts." >&2
-          exit 1
+          # While both are live, the GitOps overlays are still what ArgoCD deploys
+          # from. This write goes away in Task 20.3.7.
+          push_tag gitops \
+            "kubernetes/overlays/local/dev/${SERVICE}/kustomization.yaml" \
+            "kubernetes/overlays/eks/dev/${SERVICE}/kustomization.yaml"
+          push_tag config \
+            "local/dev/app/kustomization.yaml" \
+            "eks/dev/app/kustomization.yaml"
