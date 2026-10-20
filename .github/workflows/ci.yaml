@@ -141,12 +141,6 @@ jobs:
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
-      - name: Check out the GitOps repo
-        uses: actions/checkout@v7
-        with:
-          repository: ${{ github.repository_owner }}/lfi-infrastructure-gitops
-          token: ${{ secrets.GITOPS_PAT }}
-          path: gitops
       - name: Check out this service's config repo
         uses: actions/checkout@v7
         with:
@@ -212,7 +206,7 @@ jobs:
 
           # Prove the token can push to every checkout before writing any of
           # them. A dry run still asks GitHub for push access, and changes nothing.
-          for dir in gitops config; do
+          for dir in config; do
             if ! out="$(git -C "$dir" push --dry-run 2>&1)"; then
               echo "$out" >&2
               echo "ERROR: GITOPS_PAT cannot push to the ${dir} checkout. Give the token Contents: read and write on it. Nothing was written." >&2
@@ -220,11 +214,6 @@ jobs:
             fi
           done
 
-          # While both are live, the GitOps overlays are still what ArgoCD deploys
-          # from. This write goes away in Task 20.3.7.
-          push_tag gitops \
-            "kubernetes/overlays/local/dev/${SERVICE}/kustomization.yaml" \
-            "kubernetes/overlays/eks/dev/${SERVICE}/kustomization.yaml"
           push_tag config \
             "service-1/local/dev/kustomization.yaml" \
             "service-1/eks/dev/kustomization.yaml"
